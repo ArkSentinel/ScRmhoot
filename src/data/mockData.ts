@@ -1,10 +1,31 @@
 export type SequenceStatus = 'idle' | 'ready' | 'running' | 'completed';
 
+export interface SatBand {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  thickness: number;
+  angle: number;
+  enabled: boolean;
+}
+
 export interface Sequence {
   id: number;
   name: string;
   status: SequenceStatus;
   protocolo_id?: number;
+  
+  // Campos adicionales
+  requiresSetup?: boolean;
+  setupReason?: string;
+  estimatedTime?: number;
+  
+  // Campos de la nueva estructura
+  plane?: string;
+  slice_thickness?: number;
+  planning_instructions?: string;
+  technical_parameters?: Record<string, unknown>;
   
   // Defaults (se cargan al seleccionar)
   tr_default?: number;
@@ -30,7 +51,6 @@ export interface Sequence {
   tr_max?: number;
   te_min?: number;
   te_max?: number;
-  slice_thickness?: number;
   flip_angle_min?: number;
   flip_angle_max?: number;
   phase_direction?: string;
@@ -45,6 +65,9 @@ export interface Protocol {
   id: number;
   nombre: string;
   descripcion: string;
+  anatomical_region?: string;
+  indications?: string;
+  source_url?: string;
   secuencias?: Sequence[];
 }
 
@@ -69,7 +92,7 @@ export interface Parameter {
   label: string;
   value: string;
   unit: string;
-  type?: 'select' | 'number';
+  type?: 'select' | 'number' | 'button';
   options?: string[];
 }
 
@@ -114,6 +137,14 @@ export interface MRISequenceParams {
   
   // Sequence (informativo)
   sequenceName: string;
+  
+  // DWI
+  bValue?: number;
+  hasInfarct?: boolean;
+  infarctLocation?: { x: number; y: number; radius: number };
+
+  // Saturation Bands
+  satBands: SatBand[];
 }
 
 export const defaultParams: MRISequenceParams = {
@@ -143,7 +174,8 @@ export const defaultParams: MRISequenceParams = {
   gradientMode: 'Normal',
   multibandFactor: 1,
   
-  sequenceName: 'T2_TSE_AXIAL'
+  sequenceName: 'T2_TSE_AXIAL',
+  satBands: []
 };
 
 export const sequences: Sequence[] = [
@@ -196,6 +228,7 @@ export const paramTabs: ParameterTab[] = [
   { id: 'contrast', label: 'Contrast' },
   { id: 'resolution', label: 'Resolution' },
   { id: 'geometry', label: 'Geometry' },
+  { id: 'satbands', label: 'Sat Bands' },
   { id: 'system', label: 'System' },
   { id: 'sequence', label: 'Sequence' },
 ];
@@ -240,6 +273,14 @@ export const parameterGroups: Record<string, ParameterGroup[]> = {
         { id: 'fatSuppression', label: 'Fat Suppress', value: 'None', unit: '', type: 'select', options: ['None', 'FatSat', 'STIR'] },
       ],
     },
+    {
+      id: 'group3',
+      label: 'DWI (Diffusion)',
+      parameters: [
+        { id: 'bValue', label: 'b-value', value: '0', unit: 's/mm²', type: 'select', options: ['0', '50', '100', '500', '1000', '2000'] },
+        { id: 'clinicalCase', label: 'Case', value: 'Normal', unit: '', type: 'select', options: ['Normal', 'Acute Stroke', 'MS Lesions'] },
+      ],
+    },
   ],
   resolution: [
     {
@@ -272,6 +313,15 @@ export const parameterGroups: Record<string, ParameterGroup[]> = {
       label: 'Acquisition',
       parameters: [
         { id: 'concatenations', label: 'Concat', value: '1', unit: '' },
+      ],
+    },
+  ],
+  satbands: [
+    {
+      id: 'group1',
+      label: 'Saturation Bands',
+      parameters: [
+        { id: 'addSatBand', label: 'Add Band', value: '+', unit: '', type: 'button' },
       ],
     },
   ],

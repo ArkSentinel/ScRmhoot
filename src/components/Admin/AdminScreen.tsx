@@ -5,18 +5,39 @@ interface Protocol {
   id: number;
   nombre: string;
   descripcion: string;
-  secuencias: Sequence[];
+  anatomical_region?: string;
+  indications?: string;
+  source_url?: string;
+  secuencias?: Sequence[];
 }
 
 interface Sequence {
   id: number;
+  protocolo_id: number;
   nombre_secuencia: string;
-  tr_default: number;
-  te_default: number;
-  fov_default: number;
-  slice_thickness_default: number;
-  matrix_default: string;
-  flip_default: number;
+  plane?: string;
+  slice_thickness?: number;
+  planning_instructions?: string;
+  technical_parameters?: Record<string, unknown>;
+  tr_default?: number | null;
+  tr_min?: number | null;
+  tr_max?: number | null;
+  te_default?: number | null;
+  te_min?: number | null;
+  te_max?: number | null;
+  fov_default?: number | null;
+  fov_min?: number | null;
+  fov_max?: number | null;
+  slice_thickness_default?: number | null;
+  matrix_default?: string | null;
+  flip_default?: number | null;
+  flip_angle_min?: number | null;
+  flip_angle_max?: number | null;
+  phase_encoding_default?: string | null;
+  orientation_default?: string | null;
+  averages_default?: number | null;
+  nex?: number | null;
+  gap_percentage?: number | null;
 }
 
 export function AdminScreen() {
@@ -155,7 +176,10 @@ export function AdminScreen() {
             >
               <div className="text-xs font-medium text-white">{seq.nombre_secuencia}</div>
               <div className="text-[10px] text-gray-500 mt-1">
-                TR: {seq.tr_default} | TE: {seq.te_default} | FoV: {seq.fov_default}
+                {seq.plane && <span className="mr-2">📐 {seq.plane}</span>}
+                {seq.slice_thickness && <span className="mr-2">📏 {seq.slice_thickness}mm</span>}
+                {(seq.tr_min || seq.tr_max) && <span className="mr-2">TR: {seq.tr_min || '-'}-{seq.tr_max || '-'}</span>}
+                {(seq.te_min || seq.te_max) && <span className="mr-2">TE: {seq.te_min || '-'}-{seq.te_max || '-'}</span>}
               </div>
             </button>
           ))}
@@ -185,8 +209,8 @@ export function AdminScreen() {
                 <label className="text-xs text-gray-400">TR (ms)</label>
                 <input
                   type="number"
-                  value={editingSequence.tr_default}
-                  onChange={(e) => setEditingSequence({ ...editingSequence, tr_default: parseInt(e.target.value) })}
+                  value={editingSequence.tr_default ?? ''}
+                  onChange={(e) => setEditingSequence({ ...editingSequence, tr_default: e.target.value ? parseInt(e.target.value) : null })}
                   className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white mt-1"
                 />
               </div>
@@ -195,8 +219,8 @@ export function AdminScreen() {
                 <label className="text-xs text-gray-400">TE (ms)</label>
                 <input
                   type="number"
-                  value={editingSequence.te_default}
-                  onChange={(e) => setEditingSequence({ ...editingSequence, te_default: parseInt(e.target.value) })}
+                  value={editingSequence.te_default ?? ''}
+                  onChange={(e) => setEditingSequence({ ...editingSequence, te_default: e.target.value ? parseInt(e.target.value) : null })}
                   className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white mt-1"
                 />
               </div>
@@ -205,8 +229,8 @@ export function AdminScreen() {
                 <label className="text-xs text-gray-400">FoV (mm)</label>
                 <input
                   type="number"
-                  value={editingSequence.fov_default}
-                  onChange={(e) => setEditingSequence({ ...editingSequence, fov_default: parseInt(e.target.value) })}
+                  value={editingSequence.fov_default ?? ''}
+                  onChange={(e) => setEditingSequence({ ...editingSequence, fov_default: e.target.value ? parseInt(e.target.value) : null })}
                   className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white mt-1"
                 />
               </div>
@@ -216,8 +240,8 @@ export function AdminScreen() {
                 <input
                   type="number"
                   step="0.1"
-                  value={editingSequence.slice_thickness_default}
-                  onChange={(e) => setEditingSequence({ ...editingSequence, slice_thickness_default: parseFloat(e.target.value) })}
+                  value={editingSequence.slice_thickness_default ?? ''}
+                  onChange={(e) => setEditingSequence({ ...editingSequence, slice_thickness_default: e.target.value ? parseFloat(e.target.value) : null })}
                   className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white mt-1"
                 />
               </div>
@@ -225,10 +249,11 @@ export function AdminScreen() {
               <div>
                 <label className="text-xs text-gray-400">Matrix</label>
                 <select
-                  value={editingSequence.matrix_default}
-                  onChange={(e) => setEditingSequence({ ...editingSequence, matrix_default: e.target.value })}
+                  value={editingSequence.matrix_default ?? ''}
+                  onChange={(e) => setEditingSequence({ ...editingSequence, matrix_default: e.target.value || null })}
                   className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white mt-1"
                 >
+                  <option value="">-- Select --</option>
                   <option value="256x256">256x256</option>
                   <option value="320x320">320x320</option>
                   <option value="384x384">384x384</option>
@@ -240,8 +265,8 @@ export function AdminScreen() {
                 <label className="text-xs text-gray-400">Flip (°)</label>
                 <input
                   type="number"
-                  value={editingSequence.flip_default}
-                  onChange={(e) => setEditingSequence({ ...editingSequence, flip_default: parseInt(e.target.value) })}
+                  value={editingSequence.flip_default ?? ''}
+                  onChange={(e) => setEditingSequence({ ...editingSequence, flip_default: e.target.value ? parseInt(e.target.value) : null })}
                   className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white mt-1"
                 />
               </div>

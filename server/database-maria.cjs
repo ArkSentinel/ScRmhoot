@@ -2,43 +2,31 @@ const mysql = require('mysql2/promise');
 
 const pool = mysql.createPool({
   host: 'localhost',
-  user: 'nicolas',
-  password: '123',
+  user: 'root',
+  password: '123456',
   database: 'mri_console',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
 });
 
-function query(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    pool.execute(sql, params, (err, results) => {
-      if (err) reject(err);
-      else resolve(results);
-    });
-  });
+async function query(sql, params = []) {
+  const [results] = await pool.execute(sql, params);
+  return results;
 }
 
-function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    pool.execute(sql, params, (err, results) => {
-      if (err) reject(err);
-      else resolve(results[0] || null);
-    });
-  });
+async function get(sql, params = []) {
+  const [results] = await pool.execute(sql, params);
+  return results[0] || null;
 }
 
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    pool.execute(sql, params, function(err, result) {
-      if (err) reject(err);
-      else resolve({ lastInsertRowid: result.insertId, changes: result.affectedRows });
-    });
-  });
+async function run(sql, params = []) {
+  const [result] = await pool.execute(sql, params);
+  return { lastInsertRowid: result.insertId, changes: result.affectedRows };
 }
 
 async function all(sql, params = []) {
-  const results = await get(sql, params);
+  const [results] = await pool.execute(sql, params);
   return results || [];
 }
 

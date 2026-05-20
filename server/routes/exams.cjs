@@ -4,14 +4,25 @@ const db = require('../database-maria.cjs');
 
 router.post('/save', async (req, res) => {
   try {
-    const { 
-      paciente_id, 
+const {
+      paciente_id,
       protocolo_id,
       secuencia_id,
-      tipo_estudio, 
-      nombre_secuencia, 
-      tr, te, fov, slice_thickness,
-      flip_angle, phase_direction, matrix_size, gap_percentage, nex,
+      tipo_estudio,
+      nombre_secuencia,
+      tr,
+      te,
+      fov,
+      slice_thickness,
+      flip_angle,
+      phase_direction,
+      matrix_size,
+      gap_percentage,
+      nex,
+      base_resolution,
+      fat_suppression,
+      bValue,
+      satBands,
       box_x, box_y, box_w, box_h 
     } = req.body;
 
@@ -129,14 +140,147 @@ router.post('/save', async (req, res) => {
         }
 
         const errors = checks.filter(c => c.status === 'error').length;
+        
+        // Análisis avanzado por tipo de secuencia
+        const sequenceType = getSequenceType(nombre_secuencia);
+        const qualityAnalysis = analyzeImageQuality(sequenceType, { tr, te, flip_angle, fov, nex, matrix_size, base_resolution });
+        
+        // Recomendaciones según el tipo de secuencia
+        const recommendations = generateRecommendations(sequenceType, { tr, te, flip_angle, fov, nex, base_resolution, fat_suppression });
+        
+        // Evaluar Sat Bands
+        const satAnalysis = analyzeSatBands(satBands, tipo_estudio);
+        const allRecommendations = [...recommendations, ...satAnalysis.recommendations];
+        
+        const score = Math.round(((checks.length - errors) / checks.length) * 100);
+        const qualityScore = Math.round(qualityAnalysis.score);
+        
         evaluation = {
           sequence: sequence.nombre_secuencia,
+          sequenceType,
           total: checks.length,
           passed: checks.length - errors,
           errors,
-          checks
+          checks,
+          quality: {
+            score: qualityScore,
+            snr: qualityAnalysis.snr,
+            contrast: qualityAnalysis.contrast,
+            artifacts: qualityAnalysis.artifacts
+          },
+          satBands: {
+            count: satAnalysis.count,
+            hasNeckBand: satAnalysis.neckBandPresent
+          },
+          recommendations: allRecommendations,
+          score: Math.round((score * 0.6 + qualityScore * 0.4))
         };
       }
+    }
+
+    function getSequenceType(name) {
+      const n = (name || '').toUpperCase();
+      if (n.includes('DWI') || n.includes('DIFFUSION') || n.includes('EPI')) return 'DWI';
+      if (n.includes('FLAIR')) return 'FLAIR';
+      if (n.includes('T1') || n.includes('MPRAGE') || n.includes('SPGR')) return 'T1';
+      if (n.includes('T2') || n.includes('TSE') || n.includes('TSE')) return 'T2';
+      return 'PD';
+    }
+
+    function analyzeImageQuality(type, params) {
+      let snr = 50;
+      let contrast = 50;
+      let artifacts = 0;
+      
+      // SNR depende de averages y resolución
+      const averages = params.nex || 2;
+      const baseRes = params.base_resolution || 320;
+      snr = Math.min(100, Math.round(30 + (averages * 15) + (baseRes / 10)));
+      
+      // Contraste según tipo de secuencia
+      if (type === 'T2' || type === 'FLAIR') {
+        contrast = Math.min(100, Math.round(60 + (params.tr > 4000 ? 20 : 0) + (params.te > 80 ? 15 : 0)));
+      } else if (type === 'T1') {
+        contrast = Math.min(100, Math.round(50 + (params.tr < 600 ? 25 : 0) + (params.flip_angle > 70 && params.flip_angle < 100 ? 15 : 0)));
+      } else if (type === 'DWI') {
+        snr = Math.min(80, snr * 0.7); // DWI siempre tiene menor SNR
+        contrast = Math.min(100, 70 + (params.bValue ? Math.min(30, params.bValue / 100) : 0));
+      }
+      
+      // Artefactos
+      if (params.base_resolution >= 512 && averages <= 1) artifacts += 30;
+      if (type === 'DWI' && params.bValue && params.bValue > 500) artifacts += 25;
+      if (params.fov < 180) artifacts += 10;
+      
+      return { score: Math.max(0, 100 - artifacts), snr, contrast, artifacts };
+    }
+
+    function generateRecommendations(type, params) {
+      const recs = [];
+      
+      if (params.nex && params.nex < 2) {
+        recs.push({ level: 'warning', text: 'Bajo NEX. Considera aumentar promedios para mejor SNR.' });
+      }
+      
+      if (type === 'T2' && params.tr && params.tr < 3000) {
+        recs.push({ level: 'error', text: 'TR muy bajo para secuencia T2. Pérdida de contraste T2.' });
+      }
+      
+      if (type === 'T1' && params.tr && params.tr > 800) {
+        recs.push({ level: 'warning', text: 'TR alto para T1. Considera reducir TR para mejor contraste.' });
+      }
+      
+      if (type === 'FLAIR' && params.tr && params.tr < 8000) {
+        recs.push({ level: 'warning', text: 'TR bajo para FLAIR. La supresión de LCR puede ser incompleta.' });
+      }
+      
+      if (type === 'DWI' && (!params.bValue || params.bValue === 0)) {
+        recs.push({ level: 'info', text: 'DWI sin b-value configurado. Selecciona b-value > 0 paraverdadera difusión.' });
+      }
+      
+      if (type === 'DWI' && params.bValue && params.bValue < 500 && params.bValue > 0) {
+        recs.push({ level: 'info', text: 'b-value bajo. Para ACV agudo se recomienda b1000.' });
+      }
+      
+      if (params.fov && params.fov < 180) {
+        recs.push({ level: 'warning', text: 'FoV pequeño. Posible aliasing (foldover).' });
+      }
+      
+      if (params.fov && params.fov > 280) {
+        recs.push({ level: 'info', text: 'FoV grande. Considera reducir para mayor resolución.' });
+      }
+      
+      if (params.flip_angle && params.flip_angle > 180) {
+        recs.push({ level: 'error', text: 'Flip angle inválido. Debe ser 0-180°.' });
+      }
+      
+      return recs;
+    }
+
+    function analyzeSatBands(satBands, tipoEstudio) {
+      const recs = [];
+      const enabledBands = (satBands || []).filter(b => b.enabled);
+      
+      // Verificar si es estudio de cerebro que requiere Sat Bands
+      const isBrainStudy = (tipoEstudio || '').toLowerCase().includes('cerebro') || 
+                           (tipoEstudio || '').toLowerCase().includes('brain');
+      
+      if (isBrainStudy && enabledBands.length === 0) {
+        recs.push({ level: 'warning', text: 'Sin bandas de saturación. Considera agregar SAT para reducir artefactos de flujo.' });
+      }
+      
+      // Verificar si hay banda en zona del cuello (Y negativo)
+      const neckBand = enabledBands.find(b => b.y < -30);
+      if (!neckBand && isBrainStudy) {
+        recs.push({ level: 'info', text: 'Sin banda de saturación en zona del cuello. Artefactos de flujo vascular pueden aparecer.' });
+      }
+      
+      return {
+        hasSatBands: enabledBands.length > 0,
+        neckBandPresent: !!neckBand,
+        count: enabledBands.length,
+        recommendations: recs
+      };
     }
 
     res.json({ 

@@ -146,7 +146,6 @@ export function SchedulerScreen() {
   };
 
   const inputClass = "w-full h-6 bg-[#232323] border border-slate-700 px-2 text-xs text-white focus:outline-none focus:border-orange-500";
-  const labelClass = "w-20 text-xs text-gray-400";
   const selectClass = "w-full h-6 bg-[#232323] border border-slate-700 px-2 text-xs text-white focus:outline-none";
 
   if (loading) {

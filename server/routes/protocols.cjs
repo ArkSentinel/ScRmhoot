@@ -12,7 +12,10 @@ router.get('/', async (req, res) => {
 
     const result = protocols.map(protocol => ({
       ...protocol,
-      secuencias: sequences.filter(s => s.protocolo_id === protocol.id)
+      secuencias: sequences.map(seq => ({
+        ...seq,
+        technical_parameters: seq.technical_parameters ? JSON.parse(seq.technical_parameters) : null
+      })).filter(s => s.protocolo_id === protocol.id)
     }));
 
     res.json(result);
@@ -34,7 +37,12 @@ router.get('/:id', async (req, res) => {
     const sequencesStmt = db.prepare('SELECT * FROM secuencias WHERE protocolo_id = ?');
     const sequences = await sequencesStmt.all([req.params.id]);
     
-    res.json({ ...protocol, secuencias: sequences });
+    const parsedSequences = sequences.map(seq => ({
+      ...seq,
+      technical_parameters: seq.technical_parameters ? JSON.parse(seq.technical_parameters) : null
+    }));
+    
+    res.json({ ...protocol, secuencias: parsedSequences });
   } catch (error) {
     console.error('Error fetching protocol:', error);
     res.status(500).json({ error: 'Internal server error' });

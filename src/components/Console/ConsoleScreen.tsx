@@ -1,19 +1,33 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Save, Loader2 } from 'lucide-react';
+import { Save, Loader2, ChevronDown } from 'lucide-react';
 import { SequenceList } from '../Sidebar/SequenceList';
 import { ControlButtons } from '../Sidebar/ControlButtons';
 import { ViewerGrid } from '../Viewer/ViewerGrid';
 import { ParamTabs } from '../ParameterPanel/ParamTabs';
 import { ParamForm } from '../ParameterPanel/ParamForm';
-import { paramTabs, parameterGroups, defaultParams, type ParameterGroup, type MRISequenceParams } from '../../data/mockData';
+import { paramTabs, parameterGroups, defaultParams, type ParameterGroup, type MRISequenceParams, type Sequence, type Protocol, type SatBand } from '../../data/mockData';
 import type { Box } from '../Viewer/Viewer';
 
-interface SequenceData {
-  id: number;
-  name: string;
-  status: 'idle' | 'ready' | 'running' | 'completed';
-  [key: string]: unknown;
+interface ProtocolData extends Protocol {}
+
+type SequenceData = Sequence & { name: string; status: 'idle' | 'ready' | 'running' | 'completed' };
+
+function calculateEstimatedTime(seq: SequenceData): number {
+  const tr = seq.tr_default || seq.tr_min || seq.tr_max || 4000;
+  const slices = 24;
+  const averages = seq.averages_default || seq.nex || 2;
+  const matrix = parseInt(seq.matrix_default?.split('x')[0] || '320');
+  const partialFourier = seq.phase_partial_fourier_default === 'Off' ? 1 : 
+                         seq.phase_partial_fourier_default === '7/8' ? 0.875 : 
+                         seq.phase_partial_fourier_default === '6/8' ? 0.75 : 1;
+  const concatenations = seq.concatenations_default || 1;
+  
+  const baseTime = (tr * slices * averages * partialFourier * concatenations) / 1000000;
+  const matrixFactor = matrix > 384 ? 1.3 : matrix > 320 ? 1.1 : 1;
+  const estimatedMinutes = Math.ceil(baseTime * matrixFactor * 1.2);
+  
+  return Math.max(1, estimatedMinutes);
 }
 
 const defaultBox: Box = {
@@ -28,6 +42,8 @@ export function ConsoleScreen() {
   const location = useLocation();
   const patientData = location.state as { patient?: Record<string, string>; protocol?: string } | undefined;
 
+  const [protocols, setProtocols] = useState<ProtocolData[]>([]);
+  const [selectedProtocolId, setSelectedProtocolId] = useState<number | null>(null);
   const [sequences, setSequences] = useState<SequenceData[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState('routine');
@@ -36,46 +52,169 @@ export function ConsoleScreen() {
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
   const [loading, setLoading] = useState(true);
+  
+  const [scanActive, setScanActive] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+  const [acquiredSlices, setAcquiredSlices] = useState(0);
+  const totalSlices = params.slices || 24;
+
+  const handleStartScan = () => {
+    if (currentSequenceIndex < 0) return;
+    
+    // Verificar si la secuencia requiere setup
+    const currentSeq = sequences[currentSequenceIndex];
+    if (currentSeq.requiresSetup) {
+      alert(`⚠️ Setup requerido: ${currentSeq.setupReason || 'Parámetros fuera de rango válido'}\n\nPor favor ajuste los parámetros antes de ejecutar.`);
+      return;
+    }
+    
+    const newSequences = [...sequences];
+    newSequences[currentSequenceIndex] = { ...newSequences[currentSequenceIndex], status: 'running' };
+    setSequences(newSequences);
+    setScanActive(true);
+    setScanProgress(0);
+    setAcquiredSlices(0);
+  };
+
+  const handleStopScan = () => {
+    setScanActive(false);
+  };
+
+  const handleFastForward = () => {
+    if (!scanActive) return;
+    const slicesToAdd = Math.min(5, totalSlices - acquiredSlices);
+    const newAcquired = acquiredSlices + slicesToAdd;
+    setAcquiredSlices(newAcquired);
+    setScanProgress(Math.round((newAcquired / totalSlices) * 100));
+    
+    if (newAcquired >= totalSlices) {
+      setScanActive(false);
+      if (currentSequenceIndex >= 0 && currentSequenceIndex < sequences.length - 1) {
+        const newSequences = [...sequences];
+        newSequences[currentSequenceIndex] = { ...newSequences[currentSequenceIndex], status: 'completed' };
+        const nextIdx = currentSequenceIndex + 1;
+        newSequences[nextIdx] = { ...newSequences[nextIdx], status: 'running' };
+        setSequences(newSequences);
+        setSelectedId(newSequences[nextIdx].id);
+        loadSequenceParams(newSequences[nextIdx]);
+      }
+    }
+  };
 
   useEffect(() => {
     fetch('http://localhost:3001/api/protocols')
       .then(res => res.json())
       .then(data => {
-        if (data.length > 0 && data[0].secuencias) {
-          const loadedSequences: SequenceData[] = data[0].secuencias.map((seq: any, idx: number) => ({
-            ...seq,
-            id: seq.id,
-            name: seq.nombre_secuencia,
-            status: idx === 0 ? 'running' : idx === 1 ? 'ready' : 'idle'
-          }));
-          setSequences(loadedSequences);
-          if (loadedSequences.length > 0) {
-            setSelectedId(loadedSequences[0].id);
-            loadSequenceParams(loadedSequences[0]);
+        setProtocols(data);
+        
+        // Sincronizar con scheduler: usar protocolId del state si existe
+        const protocolIdFromScheduler = (location.state as { protocolId?: number })?.protocolId;
+        const targetProtocolId = protocolIdFromScheduler && data.find((p: ProtocolData) => p.id === protocolIdFromScheduler) 
+          ? protocolIdFromScheduler 
+          : data[0]?.id;
+        
+        if (targetProtocolId) {
+          setSelectedProtocolId(targetProtocolId);
+          const protocol = data.find((p: ProtocolData) => p.id === targetProtocolId);
+          if (protocol?.secuencias && protocol.secuencias.length > 0) {
+            const loadedSequences: SequenceData[] = protocol.secuencias.map((seq: any, idx: number) => ({
+              ...seq,
+              id: seq.id,
+              protocolo_id: targetProtocolId,
+              name: seq.nombre_secuencia,
+              estimatedTime: calculateEstimatedTime(seq),
+              status: idx === 0 ? 'running' : idx === 1 ? 'ready' : 'idle'
+            }));
+            setSequences(loadedSequences);
+            if (loadedSequences.length > 0) {
+              setSelectedId(loadedSequences[0].id);
+              loadSequenceParams(loadedSequences[0]);
+            }
           }
         }
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [location.state]);
+
+  // === INICIALIZACIÓN ÚNICA DEL BOX AL CARGAR SECUENCIA ===
+  // Solo se ejecuta una vez cuando se carga la primera secuencia del protocolo
+  const RELACION_ESCALA = 1.2;
+
+  const initializeBoxFromParams = useCallback(() => {
+    const newW = Math.max(80, Math.min(240, params.fovRead * RELACION_ESCALA));
+    const gapBetweenSlices = params.sliceThickness * (params.distanceFactor / 100);
+    const totalSliceHeight = params.sliceThickness + gapBetweenSlices;
+    const newH = Math.max(40, Math.min(220, params.slices * totalSliceHeight));
+    
+    // Centrar el box en el canvas
+    const centerX = 128 - newW / 2;
+    const centerY = 128 - newH / 2;
+    
+    return { w: newW, h: newH, x: centerX, y: centerY };
+  }, [params.fovRead, params.slices, params.sliceThickness, params.distanceFactor]);
+
+  // Aplicar inicialización solo en el primer load
+  const [boxInitialized, setBoxInitialized] = useState(false);
+  useEffect(() => {
+    if (!boxInitialized && sequences.length > 0) {
+      const initialBox = initializeBoxFromParams();
+      setBox(initialBox);
+      setBoxInitialized(true);
+    }
+  }, [sequences.length, boxInitialized, initializeBoxFromParams]);
+
+  const handleProtocolChange = (protocolId: number) => {
+    const protocol = protocols.find(p => p.id === protocolId);
+    setSelectedProtocolId(protocolId);
+    if (protocol?.secuencias && protocol.secuencias.length > 0) {
+      const loadedSequences: SequenceData[] = protocol.secuencias.map((seq: any, idx: number) => ({
+        ...seq,
+        id: seq.id,
+        protocolo_id: protocolId,
+        name: seq.nombre_secuencia,
+        estimatedTime: calculateEstimatedTime(seq),
+        status: idx === 0 ? 'running' : idx === 1 ? 'ready' : 'idle'
+      }));
+      setSequences(loadedSequences);
+      if (loadedSequences.length > 0) {
+        setSelectedId(loadedSequences[0].id);
+        loadSequenceParams(loadedSequences[0]);
+      }
+    } else {
+      setSequences([]);
+      setSelectedId(null);
+    }
+  };
 
   const loadSequenceParams = (seq: any) => {
     const s = seq;
+    const trValue = s.tr_default ?? (s.tr_min && s.tr_max ? Math.round((s.tr_min + s.tr_max) / 2) : s.tr_min ?? s.tr_max ?? 4000);
+    const teValue = s.te_default ?? (s.te_min && s.te_max ? Math.round((s.te_min + s.te_max) / 2) : s.te_min ?? s.te_max ?? 100);
+    const fovValue = s.fov_default ?? (s.fov_min && s.fov_max ? Math.round((s.fov_min + s.fov_max) / 2) : s.fov_min ?? s.fov_max ?? 220);
+    const sliceValue = s.slice_thickness ?? s.slice_thickness_default ?? 3.0;
+    const slicesValue = s.slices_default ?? s.slices ?? 24;
+    const gapValue = s.gap_percentage ?? s.gap_percentage_default ?? 10;
+    const flipValue = s.flip_default ?? 150;
+    const averagesValue = s.averages_default ?? s.nex ?? 2;
+    const matrixBase = s.base_resolution_default ?? parseInt(s.matrix_default?.split('x')[0] || '320');
+    const phaseResValue = s.phase_resolution_default ?? 100;
+    
     const newParams: MRISequenceParams = {
       sliceGroup: 1,
-      slices: 24,
-      sliceThickness: s.slice_thickness_default || 3.0,
-      distanceFactor: 10,
-      orientation: (s.orientation_default as 'Axial' | 'Sagittal' | 'Coronal') || 'Axial',
-      fovRead: s.fov_default || 220,
+      slices: slicesValue,
+      sliceThickness: sliceValue,
+      distanceFactor: gapValue,
+      orientation: (s.orientation_default as 'Axial' | 'Sagittal' | 'Coronal') || s.plane as 'Axial' | 'Sagittal' | 'Coronal' || 'Axial',
+      fovRead: fovValue,
       fovPhase: 81,
-      tr: s.tr_default || 4000,
-      te: s.te_default || 100,
-      flipAngle: s.flip_default || 150,
-      averages: s.averages_default || 2,
+      tr: trValue,
+      te: teValue,
+      flipAngle: flipValue,
+      averages: averagesValue,
       fatSuppression: (s.fat_suppression_default as 'None' | 'FatSat' | 'STIR') || 'None',
-      baseResolution: s.base_resolution_default || 320,
-      phaseResolution: s.phase_resolution_default || 100,
+      baseResolution: matrixBase,
+      phaseResolution: phaseResValue,
       phasePartialFourier: (s.phase_partial_fourier_default || 'Off') as 'Off' | '7/8' | '6/8',
       phaseEncodingDir: (s.phase_encoding_default as 'R >> L' | 'A >> P' | 'L >> R' | 'P >> A') || 'R >> L',
       phaseOversampling: s.phase_oversampling_default || 0,
@@ -83,15 +222,211 @@ export function ConsoleScreen() {
       coilElements: 'HEA; HEP',
       gradientMode: (s.gradient_mode_default as 'Normal' | 'Whisper' | 'Performance') || 'Normal',
       multibandFactor: s.multiband_factor_default || 1,
-      sequenceName: s.nombre_secuencia
+      sequenceName: s.nombre_secuencia,
+      satBands: []
     };
     setParams(newParams);
   };
 
   const selectedSequence = sequences.find(s => s.id === selectedId);
 
+  const handleReorder = useCallback((fromIndex: number, toIndex: number) => {
+    setSequences(prev => {
+      const newSeqs = [...prev];
+      const [moved] = newSeqs.splice(fromIndex, 1);
+      newSeqs.splice(toIndex, 0, moved);
+      return newSeqs;
+    });
+  }, []);
+
   const handleSequenceSelect = (seq: SequenceData) => {
     loadSequenceParams(seq);
+  };
+
+  const currentSequenceIndex = sequences.findIndex(s => s.id === selectedId);
+  const isRunning = currentSequenceIndex >= 0 && sequences[currentSequenceIndex]?.status === 'running';
+
+  const handleSkipSequence = () => {
+    if (currentSequenceIndex < 0 || currentSequenceIndex >= sequences.length - 1) return;
+    const newSequences = [...sequences];
+    newSequences[currentSequenceIndex] = { ...newSequences[currentSequenceIndex], status: 'completed' };
+    const nextIndex = currentSequenceIndex + 1;
+    newSequences[nextIndex] = { ...newSequences[nextIndex], status: 'running' };
+    setSequences(newSequences);
+    setSelectedId(newSequences[nextIndex].id);
+    loadSequenceParams(newSequences[nextIndex]);
+  };
+
+  const handleStopSequence = () => {
+    if (currentSequenceIndex < 0) return;
+    const newSequences = [...sequences];
+    newSequences[currentSequenceIndex] = { ...newSequences[currentSequenceIndex], status: 'idle' };
+    setSequences(newSequences);
+  };
+
+  const handlePauseSequence = () => {
+    if (currentSequenceIndex < 0 || !isRunning) return;
+    const newSequences = [...sequences];
+    newSequences[currentSequenceIndex] = { ...newSequences[currentSequenceIndex], status: 'idle' };
+    setSequences(newSequences);
+  };
+
+const handleContinueSequence = () => {
+    const idleIndex = sequences.findIndex(s => s.status === 'idle');
+    if (idleIndex >= 0) {
+      const newSequences = [...sequences];
+      newSequences[idleIndex] = { ...newSequences[idleIndex], status: 'running' };
+      setSequences(newSequences);
+      setSelectedId(newSequences[idleIndex].id);
+      loadSequenceParams(newSequences[idleIndex]);
+    }
+  };
+
+  const handleCopyGo = () => {
+    if (!selectedSequence) return;
+    alert(`Sequence "${selectedSequence.name}" copied to scanner!`);
+  };
+
+  // Validar si la secuencia requiere setup (inconsistencias físicas)
+  const checkRequiresSetup = (seqParams: MRISequenceParams): { requires: boolean; reason: string } => {
+    const { slices, sliceThickness, distanceFactor, tr, fovRead, baseResolution } = seqParams;
+    
+    // Calcular coverage/time constraint
+    const gap = sliceThickness * (distanceFactor / 100);
+    const totalCoverage = slices * (sliceThickness + gap);
+    const minTRforCoverage = totalCoverage * 2.5; // Aproximación
+    
+    if (tr < minTRforCoverage && slices > 10) {
+      return { requires: true, reason: 'Conflicto de cobertura: TR muy bajo para número de slices' };
+    }
+    
+    // SAR proxy: flip angle muy alto con muchos slices
+    if (seqParams.flipAngle > 150 && slices > 20) {
+      return { requires: true, reason: 'SAR可能会超标: Flip angle alto con muchos slices' };
+    }
+    
+    // FoV muy pequeño para la resolución
+    if (fovRead < 150 && baseResolution > 300) {
+      return { requires: true, reason: 'FoV muy pequeño para la resolución seleccionada' };
+    }
+    
+    // Slice thickness muy grande para el tipo de secuencia
+    if (sliceThickness > 6) {
+      return { requires: true, reason: 'Slice thickness muy grande puede causar artifacts' };
+    }
+    
+    return { requires: false, reason: '' };
+  };
+
+  // Actualizar requiresSetup en las secuencias
+  useEffect(() => {
+    const updated = sequences.map(seq => {
+      if (seq.status === 'idle' || seq.status === 'ready') {
+        // Usar los parámetros actuales si es la secuencia seleccionada
+        const seqParams = seq.id === selectedId ? params : defaultParams;
+        const check = checkRequiresSetup(seqParams);
+        return { ...seq, requiresSetup: check.requires, setupReason: check.reason };
+      }
+      return seq;
+    });
+    if (JSON.stringify(updated) !== JSON.stringify(sequences)) {
+      setSequences(updated);
+    }
+  }, [params, selectedId, sequences.length]);
+
+  // Acciones del menú contextual
+  const handleOpenSequence = (seqId: number) => {
+    const seq = sequences.find(s => s.id === seqId);
+    if (seq) {
+      setSelectedId(seqId);
+      loadSequenceParams(seq);
+    }
+  };
+
+  const handleRepeatSequence = (seqId: number) => {
+    const seqIndex = sequences.findIndex(s => s.id === seqId);
+    if (seqIndex < 0) return;
+    
+    const originalSeq = sequences[seqIndex];
+    const newSeq: SequenceData = {
+      ...originalSeq,
+      id: Date.now(),
+      name: `${originalSeq.name} (Repeat)`,
+      status: 'ready',
+      requiresSetup: false,
+      setupReason: undefined
+    };
+    
+    const newSequences = [...sequences];
+    newSequences.splice(seqIndex + 1, 0, newSeq);
+    setSequences(newSequences);
+    setSelectedId(newSeq.id);
+    loadSequenceParams(newSeq);
+  };
+
+  const handleDeleteSequence = (seqId?: number) => {
+    const targetId = seqId ?? selectedId;
+    if (targetId === null) return;
+    const newSequences = sequences.filter(s => s.id !== targetId);
+    if (newSequences.length > 0 && selectedId === targetId) {
+      setSelectedId(newSequences[0].id);
+      loadSequenceParams(newSequences[0]);
+    } else if (newSequences.length === 0) {
+      setSelectedId(null);
+    }
+    setSequences(newSequences);
+  };
+
+  const handleCopyAndGo = (seqId: number) => {
+    const seq = sequences.find(s => s.id === seqId);
+    if (!seq) return;
+    
+    const newSeq: SequenceData = {
+      ...seq,
+      id: Date.now(),
+      name: `${seq.name} (Copy)`,
+      status: 'running'
+    };
+    
+    const seqIndex = sequences.findIndex(s => s.id === seqId);
+    const newSequences = [...sequences];
+    newSequences.splice(seqIndex + 1, 0, newSeq);
+    setSequences(newSequences);
+    setSelectedId(newSeq.id);
+    loadSequenceParams(newSeq);
+    setScanActive(true);
+    setScanProgress(0);
+    setAcquiredSlices(0);
+  };
+
+  const addSatBand = () => {
+    const newBand: SatBand = {
+      id: `sat-${Date.now()}`,
+      x: 0,
+      y: 0,
+      width: 256,
+      thickness: 25,
+      angle: 0,
+      enabled: true
+    };
+    setParams(prev => ({
+      ...prev,
+      satBands: [...prev.satBands, newBand]
+    }));
+  };
+
+  const updateSatBand = (bandId: string, updates: Partial<SatBand>) => {
+    setParams(prev => ({
+      ...prev,
+      satBands: prev.satBands.map(b => b.id === bandId ? { ...b, ...updates } : b)
+    }));
+  };
+
+  const removeSatBand = (bandId: string) => {
+    setParams(prev => ({
+      ...prev,
+      satBands: prev.satBands.filter(b => b.id !== bandId)
+    }));
   };
 
   const handleParamChange = (paramId: string, value: string) => {
@@ -100,7 +435,11 @@ export function ConsoleScreen() {
       switch (paramId) {
         case 'tr': newParams.tr = parseInt(value) || 4000; break;
         case 'te': newParams.te = parseInt(value) || 100; break;
-        case 'fovRead': newParams.fovRead = parseInt(value) || 220; break;
+        case 'fovRead': 
+          newParams.fovRead = parseInt(value) || 220;
+          // Sincronizar ancho del bloque con FoV
+          setBox(b => ({ ...b, w: newParams.fovRead * 0.9 }));
+          break;
         case 'flipAngle': newParams.flipAngle = parseInt(value) || 150; break;
         case 'averages': newParams.averages = Math.max(1, Math.min(6, parseInt(value) || 2)); break;
         case 'fatSuppression': newParams.fatSuppression = value as 'None' | 'FatSat' | 'STIR'; break;
@@ -118,6 +457,21 @@ export function ConsoleScreen() {
         case 'distanceFactor': newParams.distanceFactor = parseFloat(value) || 10; break;
         case 'orientation': newParams.orientation = value as 'Axial' | 'Sagittal' | 'Coronal'; break;
         case 'fovPhase': newParams.fovPhase = parseFloat(value) || 81; break;
+        case 'bValue': 
+          newParams.bValue = parseInt(value) || 0;
+          break;
+        case 'clinicalCase':
+          if (value === 'Acute Stroke') {
+            newParams.hasInfarct = true;
+            newParams.infarctLocation = { x: 140, y: 100, radius: 18 };
+          } else if (value === 'MS Lesions') {
+            newParams.hasInfarct = true;
+            newParams.infarctLocation = { x: 100, y: 70, radius: 8 };
+          } else {
+            newParams.hasInfarct = false;
+            newParams.infarctLocation = undefined;
+          }
+          break;
       }
       return newParams;
     });
@@ -158,17 +512,37 @@ export function ConsoleScreen() {
     }));
   };
 
-  const handleBoxChange = (newBox: Box) => setBox(newBox);
+  const handleBoxChange = (newBox: Box) => {
+    // 1. Actualizar el estado visual del cuadro de forma inmediata
+    setBox(newBox);
+
+    // 2. Calcular los parámetros físicos reales basados en el nuevo tamaño del cuadro
+    const gap = params.sliceThickness * (params.distanceFactor / 100);
+    const totalSliceHeight = params.sliceThickness + gap;
+    
+    // Convertir la altura visual del cuadro a Slices reales (usando el factor de escala visual / 3.5)
+    const newSlices = Math.max(1, Math.min(60, Math.round(newBox.h / (totalSliceHeight / 3.5))));
+    const newFov = Math.max(140, Math.min(400, Math.round(newBox.w / RELACION_ESCALA)));
+
+    // 3. Forzar la actualización de parámetros solo si los valores numéricos cambiaron
+    if (newSlices !== params.slices || newFov !== params.fovRead) {
+      setParams(prev => ({
+        ...prev,
+        slices: newSlices,
+        fovRead: newFov
+      }));
+    }
+  };
 
   const handleSaveExam = async () => {
     setSaving(true);
     setSaveMessage('');
     try {
       const payload = {
-        paciente_id: 1,
-        protocolo_id: 1,
+        paciente_id: patientData?.patient?.id || null,
+        protocolo_id: selectedProtocolId,
         secuencia_id: selectedSequence?.id,
-        tipo_estudio: patientData?.protocol || 'Cerebro',
+        tipo_estudio: patientData?.protocol || selectedProtocolId ? protocols.find(p => p.id === selectedProtocolId)?.nombre : 'Cerebro',
         nombre_secuencia: params.sequenceName,
         tr: params.tr,
         te: params.te,
@@ -179,6 +553,10 @@ export function ConsoleScreen() {
         matrix_size: `${params.baseResolution}x${Math.round(params.baseResolution * params.phaseResolution / 100)}`,
         gap_percentage: params.distanceFactor,
         nex: params.averages,
+        base_resolution: params.baseResolution,
+        fat_suppression: params.fatSuppression,
+        bValue: params.bValue || 0,
+        satBands: params.satBands || [],
         box_x: box.x,
         box_y: box.y,
         box_w: box.w,
@@ -190,8 +568,19 @@ export function ConsoleScreen() {
         body: JSON.stringify(payload),
       });
       if (response.ok) {
-        setSaveMessage('✓ Exam saved!');
-        setTimeout(() => setSaveMessage(''), 3000);
+        const result = await response.json();
+        if (result.evaluation) {
+          const ev = result.evaluation;
+          setSaveMessage(`✓ Saved! Score: ${ev.score}% | Type: ${ev.sequenceType} | Passed: ${ev.passed}/${ev.total}`);
+          if (ev.recommendations && ev.recommendations.length > 0) {
+            ev.recommendations.forEach((rec: { level: string; text: string }) => {
+              console.log(`[${rec.level.toUpperCase()}] ${rec.text}`);
+            });
+          }
+        } else {
+          setSaveMessage('✓ Exam saved!');
+        }
+        setTimeout(() => setSaveMessage(''), 5000);
       }
     } catch {
       setSaveMessage('Server not running');
@@ -212,8 +601,8 @@ export function ConsoleScreen() {
     <div className="flex h-screen bg-black text-gray-300">
       <aside className="w-1/4 flex flex-col border-r border-slate-700">
         <div className="p-3 bg-[#1a1a1a] border-b border-slate-700">
-          <div className="flex items-center justify-between">
-            <div className="text-xs text-gray-500 uppercase">Sequence List</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-gray-500 uppercase">Protocol</div>
             <button
               onClick={() => navigate('/admin')}
               className="text-xs text-gray-500 hover:text-gray-300"
@@ -221,11 +610,34 @@ export function ConsoleScreen() {
               ⚙
             </button>
           </div>
+          <div className="relative">
+            <select
+              value={selectedProtocolId || ''}
+              onChange={(e) => handleProtocolChange(parseInt(e.target.value))}
+              className="w-full h-8 bg-[#232323] border border-slate-700 px-2 text-xs text-white appearance-none cursor-pointer"
+            >
+              {protocols.map((protocol) => (
+                <option key={protocol.id} value={protocol.id}>
+                  {protocol.nombre.length > 35 ? protocol.nombre.substring(0, 35) + '...' : protocol.nombre}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+          </div>
+        </div>
+
+        <div className="p-3 bg-[#1a1a1a] border-b border-slate-700 flex-1 overflow-hidden flex flex-col">
+          <div className="text-xs text-gray-500 uppercase mb-2">Sequence List ({sequences.length})</div>
           <SequenceList
             sequences={sequences}
             selectedId={selectedId}
             onSelect={setSelectedId}
             onSequenceSelect={handleSequenceSelect}
+            onReorder={handleReorder}
+            onOpen={handleOpenSequence}
+            onRepeat={handleRepeatSequence}
+            onDelete={handleDeleteSequence}
+            onCopyAndGo={handleCopyAndGo}
           />
         </div>
 
@@ -237,7 +649,47 @@ export function ConsoleScreen() {
           </div>
         )}
 
-        <div className="p-3 border-b border-slate-700">
+        <div className="p-3 border-b border-slate-700 space-y-2">
+          {isRunning && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-400">Acquisition</span>
+                <span className="text-yellow-400">{acquiredSlices}/{totalSlices} slices ({scanProgress}%)</span>
+              </div>
+              <div className="h-2 bg-[#1a1a1a] rounded overflow-hidden">
+                <div 
+                  className="h-full bg-yellow-500 transition-all duration-300"
+                  style={{ width: `${scanProgress}%` }}
+                />
+              </div>
+              <div className="flex gap-2 mt-2">
+                {scanActive ? (
+                  <>
+                    <button
+                      onClick={handleFastForward}
+                      disabled={acquiredSlices >= totalSlices}
+                      className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white text-xs rounded"
+                    >
+                      <span>⏩ Skip</span>
+                    </button>
+                    <button
+                      onClick={handleStopScan}
+                      className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs rounded"
+                    >
+                      <span>⏹ Stop</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={handleStartScan}
+                    className="w-full flex items-center justify-center gap-2 px-2 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs rounded"
+                  >
+                    <span>▶ Start Scan</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           <button
             onClick={handleSaveExam}
             disabled={saving}
@@ -251,24 +703,44 @@ export function ConsoleScreen() {
 
         <div className="mt-auto p-3 border-t border-slate-700">
           <ControlButtons
-            onDelete={() => {}}
-            onSkip={() => {}}
-            onStop={() => {}}
-            onPause={() => {}}
-            onContinue={() => {}}
-            onCopyGo={() => {}}
+            onDelete={handleDeleteSequence}
+            onSkip={handleSkipSequence}
+            onStop={handleStopSequence}
+            onPause={handlePauseSequence}
+            onContinue={handleContinueSequence}
+            onCopyGo={handleCopyGo}
           />
         </div>
       </aside>
 
       <main className="flex-1 flex flex-col">
         <div className="flex-1 p-1">
-          <ViewerGrid params={params} box={box} onBoxChange={handleBoxChange} />
+          <ViewerGrid 
+            params={params} 
+            box={box} 
+            volume={{
+              fovRead: params.fovRead,
+              fovPhase: params.fovRead * (params.fovPhase / 100),
+              coverage: (params.slices || 24) * (params.sliceThickness || 3),
+              isocenterX: box.x + box.w / 2,
+              isocenterY: box.y + box.h / 2,
+              rotation: 0
+            }}
+            onBoxChange={handleBoxChange} 
+          />
         </div>
 
         <div className="h-64 border-t border-slate-700 bg-[#1a1a1a]">
           <ParamTabs tabs={paramTabs} activeTab={activeTab} onTabChange={setActiveTab} />
-          <ParamForm groups={getCurrentParamGroups()} onParamChange={handleParamChange} activeTab={activeTab} />
+          <ParamForm 
+            groups={getCurrentParamGroups()} 
+            onParamChange={handleParamChange} 
+            activeTab={activeTab}
+            satBands={params.satBands}
+            onAddSatBand={addSatBand}
+            onUpdateSatBand={updateSatBand}
+            onRemoveSatBand={removeSatBand}
+          />
         </div>
       </main>
     </div>
